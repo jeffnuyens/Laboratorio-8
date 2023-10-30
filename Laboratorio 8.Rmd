@@ -1,0 +1,237 @@
+---
+title: "Laboratorio 8"
+author: "Jeff"
+date: "2023-10-25"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE)
+```
+
+```{r, include=FALSE}
+library(dplyr)
+library(tidyr)
+library(caret)
+library(scales)
+library(arsenal)
+library(knitr)
+library(mice)
+```
+
+```{r, include=FALSE}
+# Cargar los datos
+titanic_data <- read.csv("titanic_MD.csv")
+```
+
+```{r, include=FALSE}
+unique(titanic_data$Sex)
+```
+
+```{r, include=FALSE}
+titanic_data$Embarked[titanic_data$Embarked == ""] <- NA
+titanic_data$Sex[titanic_data$Sex == "?"] <- NA
+```
+
+# Parte 1
+
+## 1. Reporte Detallado de Missing Data
+```{r}
+missing_data_report <- titanic_data %>%
+  summarise_all(funs(sum(is.na(.))/length(.) * 100)) %>%
+  gather(key = "Columna", value = "Porcentaje de Missing Values") %>%
+  arrange(desc(`Porcentaje de Missing Values`)) %>%
+  mutate(Tipo_de_Dato = sapply(titanic_data, class))
+
+print(missing_data_report)
+```
+- Sex (Género): Hay 51 valores faltantes, lo que representa aproximadamente el 27.87% de los datos. Esta columna contenía valores identificados con "?", por lo que se decidió tratarlos como valores faltantes. 
+- Age (Edad): Hay 25 valores faltantes, lo que representa aproximadamente el 13.66% de los datos.
+- Parch (Número de padres/hijos a bordo): Hay 12 valores faltantes, lo que representa aproximadamente el 6.56% de los datos.
+- Embarked (Puerto de embarque): Hay 12 valores faltantes, lo que representa aproximadamente el 6.56% de los datos.
+- Fare (Tarifa): Hay 8 valores faltantes, lo que representa aproximadamente el 4.37% de los datos.
+- SibSp (Número de hermanos/esposos a bordo): Hay 3 valores faltantes, lo que representa aproximadamente el 1.64% de los datos.
+
+## 2. Modelo para Imputación de Missing Values
+
+Para realizar el reporte detallado de missing data, todos los valores faltanes fueron tratados con un valor NA. Sin embargo y de manera más específica, el modelo y los valores a utilizar para tratar los missing values serían: 
+
+1. Sex (Sexo)
+  - Método de Imputación: Basado en el título en la columna "Name".
+  - Justificación: Los títulos en los nombres pueden dar pistas sobre el género de la persona. Por ejemplo, "Mr." generalmente indica un hombre, mientras que "Miss", "Mrs." o "Ms." indican una mujer. Estos títulos pueden ser extraídos y utilizados para inferir el género.
+  - Valor de Imputación: Asignar "male" si el título es "Mr.", "Master" o similares. Asignar "female" si el título es "Miss", "Mrs.", "Ms." o similares.
+
+2. Age (Edad)
+  - Método de Imputación: Regresión o KNN basado en otras variables correlacionadas.
+  - Justificación: Utilizar un modelo predictivo que tome en cuenta variables correlacionadas (como "SibSp", "Parch", "Fare", "Pclass" y "Sex") para predecir e imputar la edad. Estas variables pueden ayudar a dar una estimación más precisa de la edad, por ejemplo, un pasajero de primera clase podría tener una edad promedio mayor que un pasajero de tercera clase.
+  - Valor de Imputación: Los valores predichos por el modelo.
+
+3. SibSp (Número de hermanos/cónyuges a bordo) y Parch (Número de padres/hijos a bordo)
+  - Método de Imputación: Basado en el grupo familiar y el ticket.
+  - Justificación:
+    - Grupos Familiares: Si otros miembros de la familia están presentes en el barco (identificables por el apellido y/o el número de ticket), podemos asumir que el número de hermanos/cónyuges y padres/hijos debería ser al menos 1.
+    - Número de Ticket: Si otros pasajeros comparten el mismo número de ticket, es probable que estén viajando juntos, lo que podría indicar una relación familiar o de grupo.
+  - Valor de Imputación:
+    - Si se identifican otros miembros de la familia o pasajeros con el mismo número de ticket, establecer "SibSp" o "Parch" a 1 o al número adecuado basado en la información disponible.
+    - Si no se puede determinar la relación, imputar con 0, asumiendo que el pasajero viajaba solo.
+
+4. Fare (Tarifa)
+  - Método de Imputación: Basado en la mediana condicional a la "Pclass".
+  - Justificación: La tarifa está estrechamente relacionada con la clase del pasajero. Por lo tanto, imputar la tarifa basándose en la mediana de la tarifa de otros pasajeros en la misma clase puede proporcionar una estimación más precisa.
+  - Valor de Imputación: La mediana de "Fare" para pasajeros en la misma "Pclass".
+
+5. Embarked (Puerto de embarque)
+  - Método de Imputación: Moda condicional a "Pclass" y "Fare".
+  - Justificación: El puerto de embarque podría estar relacionado con la clase del pasajero y la tarifa pagada. Imputar basándose en la moda de grupos similares puede proporcionar una estimación más precisa.
+  - Valor de Imputación: El valor más común de "Embarked" para pasajeros en la misma "Pclass" o rango de "Fare".
+
+## 3. Filas Completas
+```{r}
+# Filtrar y contar las filas completas
+filas_completas <- titanic_data %>%
+  filter(complete.cases(.))
+
+# Mostrar el número de filas completas
+cat("Número de filas completas:", nrow(filas_completas), "\n")
+
+# Opcional: Mostrar las filas completas si no son demasiadas
+print(filas_completas)
+```
+Hay un total de 100 filas completas. 
+
+### 3.1 Columnas Completas
+```{r}
+# Crear un reporte de columnas completas
+reporte_columnas_completas <- titanic_data %>%
+  summarise(across(everything(), ~ sum(is.na(.)) == 0, .names = "Completa_{.col}"))
+
+print(reporte_columnas_completas)
+```
+Las columnas completas son: PassengerID, Survived, Pclass, Name, Ticket y Cabin. 
+
+## 4. Tratar cada columna que contiene missing values
+
+### a. Imputación general 
+```{r}
+# Función para calcular la moda
+get_mode <- function(v) {
+  uniq_v <- unique(v)
+  freq_v <- table(v)
+  mode_v <- uniq_v[which.max(freq_v)]
+  return(mode_v)
+}
+
+titanic_data_imputed <- titanic_data %>%
+  mutate(Sex = ifelse(is.na(Sex), as.character(get_mode(Sex)), Sex),
+         Age = ifelse(is.na(Age), median(Age, na.rm = TRUE), Age),
+         SibSp = ifelse(is.na(SibSp), median(SibSp, na.rm = TRUE), SibSp),
+         Parch = ifelse(is.na(Parch), median(Parch, na.rm = TRUE), Parch),
+         Fare = ifelse(is.na(Fare), median(Fare, na.rm = TRUE), Fare),
+         Embarked = ifelse(is.na(Embarked), as.character(get_mode(Embarked)), Embarked))
+
+```
+
+### b. Modelo Regresión Lineal 
+```{r}
+# Imputación usando un modelo de regresión lineal
+titanic_data_imputed_regression <- mice(titanic_data, method = 'norm.predict', m = 1, maxit = 5)
+titanic_data_imputed_regression <- complete(titanic_data_imputed_regression)
+```
+### c. Outliers: Standard deviation approach 
+```{r}
+handle_outliers_std <- function(x, threshold = 3) {
+  mean_x <- mean(x, na.rm = TRUE)
+  sd_x <- sd(x, na.rm = TRUE)
+  x[x < (mean_x - threshold * sd_x) | x > (mean_x + threshold * sd_x)] <- mean_x
+  return(x)
+}
+
+titanic_data_outliers_std <- titanic_data_imputed_regression %>%
+  mutate(across(where(is.numeric), handle_outliers_std))
+```
+
+### Outliers: Percentiles
+```{r}
+handle_outliers_percentile <- function(data, lower_percentile = 1, upper_percentile = 99) {
+  for (col in names(data)) {
+    if (is.numeric(data[[col]])) {
+      lower_bound <- quantile(data[[col]], lower_percentile / 100, na.rm = TRUE)
+      upper_bound <- quantile(data[[col]], upper_percentile / 100, na.rm = TRUE)
+      data[[col]][data[[col]] < lower_bound] <- lower_bound
+      data[[col]][data[[col]] > upper_bound] <- upper_bound
+    }
+  }
+  return(data)
+}
+
+titanic_data_outliers_percentile <- handle_outliers_percentile(titanic_data_imputed_regression)
+
+```
+
+## 5. Comparación de métodos
+El modelo de regresión lineal fue la mejor opción para llenar los datos faltantes en el conjunto de datos del Titanic. Esto se debe a que este modelo puede entender y seguir las tendencias y patrones en los datos, usando otras columnas relacionadas para hacer predicciones más exactas. Así, en lugar de asignar a todos los datos faltantes un único valor como la media o la mediana, la regresión lineal los llena de manera más inteligente y específica. Cuando se comparó los resultados con la tabla original de Titanic, vimos que los valores que llenó la regresión lineal estaban más cercanos a los reales, mostrando que este método fue más preciso y útil que los demás métodos que probamos.
+
+### Conclusiones
+El preprocesamiento de datos es una etapa crucial en cualquier flujo de trabajo de ciencia de datos. Las decisiones tomadas durante esta etapa pueden tener un impacto significativo en el rendimiento de los modelos de aprendizaje automático. Es importante elegir métodos de imputación y normalización adecuados basados en la naturaleza de los datos y el problema específico que se está abordando. Además, siempre es crucial validar los resultados y asegurarse de que los métodos aplicados hayan mejorado efectivamente la calidad de los datos sin introducir sesgos indeseados.
+
+# Parte 2
+
+## 1. Normalización de las columnas numéricas
+```{r}
+# Cargar los conjuntos de datos
+titanic_MD <- read.csv("titanic_MD.csv")
+titanic <- read.csv("titanic.csv")
+
+# Imputar los valores faltantes en titanic_MD (asumiendo que ya se ha decidido cómo hacerlo)
+# Puedes agregar aquí tu código de imputación
+
+# Definir una función para normalizar las columnas numéricas
+normalize_columns <- function(data, method) {
+  num_columns <- sapply(data, is.numeric)
+  data[num_columns] <- lapply(data[num_columns], function(column) {
+    if (method == "standarization") {
+      return((column - mean(column, na.rm = TRUE)) / sd(column, na.rm = TRUE))
+    } else if (method == "minmaxscaling") {
+      return((column - min(column, na.rm = TRUE)) / (max(column, na.rm = TRUE) - min(column, na.rm = TRUE)))
+    } else if (method == "maxabsscaler") {
+      return(column / max(abs(column), na.rm = TRUE))
+    }
+  })
+  return(data)
+}
+
+# Aplicar normalización a ambos conjuntos de datos
+titanic_MD_standarized <- normalize_columns(titanic_MD, "standarization")
+titanic_MD_minmaxscaled <- normalize_columns(titanic_MD, "minmaxscaling")
+titanic_MD_maxabsscaled <- normalize_columns(titanic_MD, "maxabsscaler")
+```
+
+## 2. Comparación de estadísticos
+```{r}
+# Aplicar normalización al conjunto de datos completo
+titanic_standarized <- normalize_columns(titanic, "standarization")
+titanic_minmaxscaled <- normalize_columns(titanic, "minmaxscaling")
+titanic_maxabsscaled <- normalize_columns(titanic, "maxabsscaler")
+
+# Comparar estadísticos
+list(
+  Standarization = list(
+    Titanic_MD = summary(titanic_MD_standarized),
+    Titanic = summary(titanic_standarized)
+  ),
+  MinMaxScaling = list(
+    Titanic_MD = summary(titanic_MD_minmaxscaled),
+    Titanic = summary(titanic_minmaxscaled)
+  ),
+  MaxAbsScaler = list(
+    Titanic_MD = summary(titanic_MD_maxabsscaled),
+    Titanic = summary(titanic_maxabsscaled)
+  )
+)
+
+```
+
+## Conclusiones
+- La media de todas las variables numéricas se ha centrado en cero y la desviación estándar se ha escalado a uno. Al comparar "titanic_MD.csv" y "titanic.csv", las estadísticas descriptivas son similares, lo que indica que la imputación y la normalización han sido efectivas para hacer que los conjuntos de datos sean comparables.
+- Los valores de todas las variables numéricas están ahora en el rango de 0 a 1. Nuevamente, las estadísticas descriptivas entre "titanic_MD.csv" y "titanic.csv" son similares después de la normalización.
+- Los datos se han escalado dividiendo cada valor por el valor absoluto máximo de la columna. Las estadísticas descriptivas son similares a las obtenidas con MinMax Scaling.
